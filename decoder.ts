@@ -64,7 +64,7 @@ p._socketReader.onMessage((msg) => {
         switch (t) {
           case 100: return 'req';
           case 101: return 'cancel';
-          case 102: return 'subscript';
+          case 102: return 'subscribe';
           case 103: return 'unsubscribe';
           case 200: return 'init';
           case 201: return 'reply';
@@ -74,6 +74,9 @@ p._socketReader.onMessage((msg) => {
         }
       }
       console.log(`${stream}-${tokenSuffix} ${dir} ${ipcTypeToString(header[0])} ${JSON.stringify(header)} ${JSON.stringify(body).slice(0,1024)}`);
+      if (header[0] === 100 || header[0] === 102) {
+        incStat(stream, `${header[2]}/${header[3]}`, header[0] === 102);
+      }
       return;
     }
 
@@ -91,12 +94,14 @@ p._socketReader.onMessage((msg) => {
         case MessageType.RequestJSONArgsWithCancellation: {
           let { rpcId, method, args } = MessageIO.deserializeRequestJSONArgs(buff);
           logMessage("req-json-args", [rpcId, method, args, (messageType === MessageType.RequestJSONArgsWithCancellation)]);
+          incStat(stream, method);
           break;
         }
         case MessageType.RequestMixedArgs:
         case MessageType.RequestMixedArgsWithCancellation: {
           let { rpcId, method, args } = MessageIO.deserializeRequestMixedArgs(buff);
           logMessage("req-mixed-args", [rpcId, method, args, (messageType === MessageType.RequestMixedArgsWithCancellation)]);
+          incStat(stream, method);
           break;
         }
         case MessageType.Acknowledged: {

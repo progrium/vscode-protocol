@@ -6,7 +6,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/signal"
+	"sort"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/dop251/goja"
 	esbuild "github.com/evanw/esbuild/pkg/api"
@@ -19,7 +24,73 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
+type _stats struct {
+	ManagementCommands         map[string]int
+	ManagementEvents           map[string]int
+	ExtensionHostServerMethods map[string]int
+	ExtensionHostClientMethods map[string]int
+	mu                         sync.Mutex
+}
+
+// tracking number of methods/commands run in each dir
+var stats _stats
+
+func outputStat(counts map[string]int) {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return counts[keys[i]] > counts[keys[j]]
+	})
+	for _, key := range keys {
+		fmt.Printf("%s: %d\n", key, counts[key])
+	}
+}
+
+func incStat(stream, dir, name string, event bool) {
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+	switch stream {
+	case "Management":
+		if event {
+			stats.ManagementEvents[name]++
+		} else {
+			stats.ManagementCommands[name]++
+		}
+	case "ExtensionHost":
+		if dir == "<<" {
+			stats.ExtensionHostClientMethods[name]++
+		} else {
+			stats.ExtensionHostServerMethods[name]++
+		}
+	}
+}
+
 func main() {
+	stats.ExtensionHostClientMethods = make(map[string]int)
+	stats.ExtensionHostServerMethods = make(map[string]int)
+	stats.ManagementEvents = make(map[string]int)
+	stats.ManagementCommands = make(map[string]int)
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT)
+	go func() {
+		<-sigChan
+		fmt.Println("\nSTATS:")
+		fmt.Println("- Management Commands")
+		outputStat(stats.ManagementCommands)
+		fmt.Println("\n- Management Events")
+		outputStat(stats.ManagementEvents)
+		fmt.Println("\n- ExtensionHost Server Methods")
+		outputStat(stats.ExtensionHostServerMethods)
+		fmt.Println("\n- ExtensionHost Client Methods")
+		outputStat(stats.ExtensionHostClientMethods)
+		total := len(stats.ExtensionHostServerMethods) + len(stats.ExtensionHostClientMethods) + len(stats.ManagementCommands) + len(stats.ManagementEvents)
+		fmt.Printf("\n- Total Unique Methods/Commands/Events: %d\n", total)
+		os.Exit(0)
+	}()
+
 	result := esbuild.Build(esbuild.BuildOptions{
 		EntryPoints: []string{"decoder.ts"},
 		Write:       false,
@@ -174,6 +245,16 @@ func newParserVM(token, dir string) *parserVM {
 
 	vm.GlobalObject().Set("tokenSuffix", tokenSuffix)
 	vm.GlobalObject().Set("dir", dir)
+	vm.GlobalObject().Set("incStat", func(call goja.FunctionCall) goja.Value {
+		stream := call.Arguments[0].String()
+		name := call.Arguments[1].String()
+		if stream == "Management" {
+			incStat(stream, dir, name, call.Arguments[2].ToBoolean())
+		} else {
+			incStat(stream, dir, name, false)
+		}
+		return nil
+	})
 
 	pvm := &parserVM{
 		Runtime: vm,
